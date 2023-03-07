@@ -90,6 +90,7 @@ class aitextgen:
         cache_dir: str = "aitextgen",
         tf_gpt2: str = None,
         to_gpu: bool = False,
+        to_mps: bool = False,
         to_fp16: bool = False,
         verbose: bool = False,
         gradient_checkpointing: bool = False,
@@ -272,6 +273,9 @@ class aitextgen:
                 )
                 self.to_fp16()
             self.to_gpu()
+
+        if to_mps:
+            self.to_mps()
 
     def generate(
         self,
@@ -554,6 +558,7 @@ class aitextgen:
         output_dir: str = "trained_model",
         fp16: bool = False,
         fp16_opt_level: str = "O1",
+        accelerator: str = "cpu",
         n_gpu: int = -1,
         tpu_cores: int = 0,
         max_grad_norm: float = 0.5,
@@ -589,6 +594,7 @@ class aitextgen:
         model file folder.
         :param fp16: Boolean whether to use fp16, assuming using a compatible GPU/TPU.
         :param fp16_opt_level: Option level for FP16/APEX training.
+        :param accelerator: pytorch-lightning accelerator to use. Can be "cpu", "gpu", "tpu".
         :param n_gpu: Number of GPU to use (-1 implies all available GPUs)
         :param tpu_cores: Number of TPU cores to use (should be a multiple of 8)
         :param max_grad_norm: Maximum gradient normalization
@@ -624,6 +630,7 @@ class aitextgen:
 
         self.model = self.model.train()
         is_gpu_used = torch.cuda.is_available() and n_gpu != 0
+        is_mps_used = torch.backends.mps.is_available() and n_gpu != 0
 
         if isinstance(train_data, str):
             block_size = model_max_length(self.model.config)
@@ -654,6 +661,9 @@ class aitextgen:
             # Use all CPU cores as workers if not training on CPU
             if is_gpu_used or tpu_cores > 0:
                 num_workers = os.cpu_count()
+            # Use all CPU cores as workers if training on MPS
+            elif is_mps_used:
+                num_workers = os.cpu_count()
             # If training on the CPU, use half the CPUs
             else:
                 num_workers = int(os.cpu_count() / 2)
@@ -665,7 +675,7 @@ class aitextgen:
             warmup_steps=warmup_steps,
             batch_size=batch_size,
             num_steps=num_steps,
-            pin_memory=is_gpu_used,
+            pin_memory=(is_gpu_used | is_mps_used),
             num_workers=num_workers,
             save_every=save_every,
             generate_every=generate_every,
@@ -685,7 +695,7 @@ class aitextgen:
             )
 
         # if try to use a GPU but no CUDA, use CPU
-        if not is_gpu_used:
+        if not is_gpu_used and not is_mps_used:
             n_gpu = 0
 
         # force single-GPU on Windows
@@ -693,6 +703,13 @@ class aitextgen:
             logger.warning(
                 "Windows does not support multi-GPU training. Setting to 1 GPU."
             )
+            n_gpu = 1
+
+        if is_gpu_used:
+            accelerator = "gpu"
+
+        if is_mps_used:
+            accelerator = "mps"
             n_gpu = 1
 
         # use the DeepSpeed plugin if installed and specified
@@ -706,7 +723,8 @@ class aitextgen:
 
         train_params = dict(
             accumulate_grad_batches=gradient_accumulation_steps,
-            gpus=n_gpu,
+            accelerator=accelerator,
+            devices=n_gpu,
             max_steps=num_steps,
             gradient_clip_val=max_grad_norm,
             enable_checkpointing=False, #checkpoint_callback deprecated in pytorch_lighning v1.7
@@ -743,6 +761,9 @@ class aitextgen:
         # benchmark gives a boost for GPUs if input size is constant,
         # which will always be the case with aitextgen training
         if is_gpu_used and benchmark:
+            train_params["benchmark"] = True
+
+        if is_mps_used and benchmark:
             train_params["benchmark"] = True
 
         if n_gpu > 1:
@@ -840,6 +861,13 @@ class aitextgen:
         assert torch.cuda.is_available(), "CUDA is not installed."
 
         self.model.to(torch.device("cuda", index))
+
+    def to_mps(self, index: int = 0) -> None:
+        """Moves the model to the specified MPS."""
+
+        assert torch.backends.mps.is_available(), "MPS is not installed."
+
+        self.model.to(torch.device("mps", index))
 
     def to_cpu(self, index: int = 0) -> None:
         """Moves the model to the specified CPU."""

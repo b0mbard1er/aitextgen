@@ -11,7 +11,7 @@ from transformers import get_linear_schedule_with_warmup
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks.progress import ProgressBarBase
-from pytorch_lightning.utilities import _TPU_AVAILABLE
+from pytorch_lightning.accelerators import TPUAccelerator
 
 
 class ATGTransformer(pl.LightningModule):
@@ -148,13 +148,16 @@ class ATGProgressBar(ProgressBarBase):
         items.pop("v_num", None)
         return items
 
-    def on_batch_end(self, trainer, pl_module):
-        super().on_batch_end(trainer, pl_module)
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
 
         # clean up the GPU cache used for the benchmark
         # https://discuss.pytorch.org/t/about-torch-cuda-empty-cache/34232/4
         if self.steps == 0 and self.gpu:
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            elif torch.mps.is_available():
+                torch.mps.empty_cache()
 
         metrics = self.get_metrics(trainer, pl_module)
         current_loss = float(metrics["loss"])
@@ -169,7 +172,7 @@ class ATGProgressBar(ProgressBarBase):
         desc = f"Loss: {current_loss:.3f} — Avg: {avg_loss:.3f}"
 
         if self.steps % self.progress_bar_refresh_rate == 0:
-            if self.gpu:
+            if self.gpu and torch.cuda.is_available():
                 # via pytorch-lightning's get_gpu_memory_map()
                 result = subprocess.run(
                     [
@@ -187,7 +190,7 @@ class ATGProgressBar(ProgressBarBase):
             self.main_progress_bar.update(self.progress_bar_refresh_rate)
             self.main_progress_bar.set_description(desc)
         
-        if _TPU_AVAILABLE and self.save_every_check:
+        if TPUAccelerator.is_available() and self.save_every_check:
             did_unfreeze = False
             if self.enabled:
                 self.unfreeze_layers(pl_module)
@@ -198,7 +201,7 @@ class ATGProgressBar(ProgressBarBase):
         
         if self.enabled:
             did_unfreeze = False
-            if not _TPU_AVAILABLE and self.save_every_check:
+            if not TPUAccelerator.is_available() and self.save_every_check:
                 self.unfreeze_layers(pl_module)
                 self.save_pytorch_model(trainer, pl_module)
                 did_unfreeze = True
